@@ -626,15 +626,55 @@
             var actionTarget = { type: null, id: null };
             var adminSyncInterval = null;
 
+            // URL Web App Apps Script. Ganti dengan URL deployment milik Anda (/exec).
+            var APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzMZ_FEO3HH15PGA3zwWcERQQ5Zbrew_OPRjEBVzjvW6zR_V317nw6J1cLL7C8sm5ayAQ/exec';
+            var adminSessionToken = '';
+            var ADMIN_ONLY_METHODS = ['saveAdminToSheet','deleteAdminFromSheet','saveCandidateToSheet','deleteCandidateFromSheet','saveVotersBulkToSheet','deleteVoterFromSheet','setPollingStatusInSheet','resetAllVotesInSheet','resetAndRegenerateCodesInSheet'];
+
+            // GitHub Pages tidak memiliki google.script.run. Karena Web App Apps Script
+            // tidak menyediakan CORS umum untuk fetch, komunikasi memakai form POST + iframe.
             function callBackend(funcName) {
                 var args = Array.prototype.slice.call(arguments, 1);
-                return new Promise(function(resolve) {
+                if (ADMIN_ONLY_METHODS.indexOf(funcName) !== -1) args.push(adminSessionToken);
+                return new Promise(function(resolve, reject) {
                     try {
                         if (typeof google !== 'undefined' && google.script && google.script.run) {
-                            var runner = google.script.run.withSuccessHandler(function(res) { resolve(res); }).withFailureHandler(function(err) { resolve(null); });
+                            var runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(function(err) {
+                                reject(new Error(err && err.message ? err.message : String(err)));
+                            });
                             runner[funcName].apply(runner, args);
-                        } else resolve(null);
-                    } catch (e) { resolve(null); }
+                            return;
+                        }
+                        if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf('PASTE_URL_') === 0) {
+                            reject(new Error('URL Web App Apps Script belum diatur pada variabel APPS_SCRIPT_URL.'));
+                            return;
+                        }
+                        var requestId = 'req_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+                        var iframe = document.createElement('iframe');
+                        iframe.name = requestId; iframe.style.display = 'none'; iframe.setAttribute('aria-hidden','true');
+                        var form = document.createElement('form');
+                        form.method = 'POST'; form.action = APPS_SCRIPT_URL; form.target = requestId; form.style.display = 'none';
+                        var payload = document.createElement('input'); payload.type = 'hidden'; payload.name = 'payload';
+                        payload.value = JSON.stringify({requestId:requestId, funcName:funcName, args:args});
+                        form.appendChild(payload); document.body.appendChild(iframe); document.body.appendChild(form);
+                        var finished = false;
+                        function cleanup() { window.removeEventListener('message', onMessage); form.remove(); setTimeout(function(){iframe.remove();},1000); }
+                        function onMessage(event) {
+                            if (!event.data || event.data.requestId !== requestId) return;
+                            // Apps Script dapat mengirim pesan dari frame internal Google, bukan
+                            // langsung dari elemen iframe yang dibuat halaman GitHub Pages.
+                            if (!/(^|\.)googleusercontent\.com$/.test((function(){try{return new URL(event.origin).hostname;}catch(e){return '';}})())) return;
+                            finished = true; cleanup();
+                            if (event.data.error) reject(new Error(event.data.error)); else resolve(event.data.result);
+                        }
+                        window.addEventListener('message', onMessage);
+                        setTimeout(function(){ if (!finished) { cleanup(); reject(new Error('Apps Script tidak merespons. Periksa URL deployment, izin akses, dan deployment versi terbaru.')); } }, 30000);
+                        form.submit();
+                    } catch (e) { reject(e); }
+                }).catch(function(err) {
+                    var message = err && err.message ? err.message : 'Koneksi ke Google Apps Script gagal.';
+                    if (typeof showToast === 'function') showToast(message, 'error');
+                    return null;
                 });
             }
 
@@ -814,12 +854,14 @@
                             localStorage.removeItem('savedAdminUser');
                         }
 
-                        state.currentAdmin = res.admin; document.getElementById('currentAdminName').innerText = res.admin.name;
+                        state.currentAdmin = res.admin; adminSessionToken = res.sessionToken || ''; document.getElementById('currentAdminName').innerText = res.admin.name;
                         var admPhotoEl = document.getElementById('currentAdminPhoto'); if (admPhotoEl) admPhotoEl.src = res.admin.photo || 'https://placehold.co/150x150/065f46/ffffff?text=Admin';
                         closeModal('adminAuthModal'); openModal('adminDashboardOverlay'); renderAdminTables();
                         document.getElementById('rekapitulasiChartsContainer').innerHTML = ''; setTimeout(renderAdminCharts, 150);
                         startAdminSync(); 
                         showToast('Login Sukses. Halo ' + res.admin.name, 'success');
+                    } else if (res === null) {
+                        showToast('Tidak dapat menghubungi server Google Apps Script. Periksa URL Web App dan deployment.', 'error');
                     } else { showToast('Username atau password Admin salah!', 'error'); }
                 });
             }
